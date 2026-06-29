@@ -21,8 +21,6 @@ pub struct Config {
     pub palette: Palette,
     /// Side the song panel sits on ("left" or "right").
     pub song_side: Side,
-    /// How album art is scaled: smooth (Lanczos) or crisp (nearest-neighbour).
-    pub art_filter: ArtFilter,
 
     // --- lyrics ---
     /// Lyrics panel mode: off, full (replaces visualizer), or split (both).
@@ -70,15 +68,6 @@ pub enum Side {
     Right,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "lowercase")]
-pub enum ArtFilter {
-    /// Lanczos3 — smooth, good for larger source art.
-    Smooth,
-    /// Nearest-neighbour — crisp/pixelated, nice for small thumbnails.
-    Crisp,
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LyricsMode {
@@ -109,22 +98,6 @@ impl LyricsMode {
     }
 }
 
-impl ArtFilter {
-    pub fn toggle(self) -> ArtFilter {
-        match self {
-            ArtFilter::Smooth => ArtFilter::Crisp,
-            ArtFilter::Crisp => ArtFilter::Smooth,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            ArtFilter::Smooth => "smooth",
-            ArtFilter::Crisp => "crisp",
-        }
-    }
-}
-
 impl Side {
     pub fn flip(self) -> Side {
         match self {
@@ -142,7 +115,6 @@ impl Default for Config {
             mode: VisMode::Bars,
             palette: Palette::Spectrum,
             song_side: Side::Left,
-            art_filter: ArtFilter::Smooth,
             lyrics_mode: LyricsMode::Off,
             lyrics_romaji: true,
             lyrics_translate: false,
@@ -236,4 +208,10 @@ pub struct Cli {
     /// List available capture sources and exit.
     #[arg(long)]
     pub list_sources: bool,
+    /// Update beatscope to the latest GitHub release and exit.
+    #[arg(long)]
+    pub update: bool,
+    /// With --update, reinstall the latest release even if already current.
+    #[arg(long)]
+    pub force: bool,
 }

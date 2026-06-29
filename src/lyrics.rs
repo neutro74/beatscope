@@ -2,9 +2,9 @@
 //! line-by-line translation (unofficial Google endpoint), all off the UI thread.
 
 use std::io::Read;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -252,9 +252,16 @@ fn worker(state: Arc<Mutex<Lyrics>>, generation: Arc<AtomicU64>, rx: Receiver<Re
     }
 }
 
+/// Number of concurrent line fetches. Enough to hide per-request latency without
+/// hammering the (single-host) translation endpoint into rate limiting.
+const EXTRAS_WORKERS: usize = 6;
+
 /// Fetch translation and/or romanization for the lines still missing them,
-/// publishing each as it arrives. Returns false if a newer request superseded
-/// this one mid-way (so the caller shouldn't cache a partial result as complete).
+/// publishing each as it arrives. Runs the per-line requests concurrently over a
+/// small worker pool (sharing the keep-alive agent), which is dramatically faster
+/// than one blocking round-trip at a time. Returns false if a newer request
+/// superseded this one mid-way (so the caller shouldn't cache a partial result as
+/// complete).
 fn run_extras(
     lines: &mut [LyricLine],
     want_tr: bool,
@@ -264,45 +271,87 @@ fn run_extras(
     my_gen: u64,
     generation: &Arc<AtomicU64>,
 ) -> bool {
-    for i in 0..lines.len() {
-        if generation.load(Ordering::SeqCst) != my_gen {
-            return false;
-        }
-        if lines[i].text.trim().is_empty() {
-            continue;
-        }
-        let need_tr = want_tr && lines[i].translation.is_none();
-        // No point romanizing a line that's already plain ASCII (e.g. lyrics that
-        // already come romanized) — it would just duplicate the line.
-        let need_rm = want_rm && lines[i].romaji.is_none() && !lines[i].text.is_ascii();
-        if !need_tr && !need_rm {
-            continue;
-        }
-        let (tr, rm) = fetch_line(&lines[i].text, need_tr, need_rm);
-        if tr.is_some() {
-            lines[i].translation = tr.clone();
-        }
-        if rm.is_some() {
-            lines[i].romaji = rm.clone(); // network reading replaces kana fallback
-        }
-        if generation.load(Ordering::SeqCst) != my_gen {
-            return false;
-        }
-        let mut s = state.lock().unwrap();
-        if s.key == key {
-            if let Some(line) = s.lines.get_mut(i) {
-                if tr.is_some() {
-                    line.translation = tr;
-                }
-                if rm.is_some() {
-                    line.romaji = rm;
+    // Lines that still need a network fetch (text + what's missing).
+    let tasks: Vec<(usize, String, bool, bool)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            if l.text.trim().is_empty() {
+                return None;
+            }
+            let need_tr = want_tr && l.translation.is_none();
+            // No point romanizing a line that's already plain ASCII (e.g. lyrics
+            // that already come romanized) — it would just duplicate the line.
+            let need_rm = want_rm && l.romaji.is_none() && !l.text.is_ascii();
+            (need_tr || need_rm).then(|| (i, l.text.clone(), need_tr, need_rm))
+        })
+        .collect();
+    if tasks.is_empty() {
+        return true;
+    }
+
+    let tasks = Arc::new(tasks);
+    let next = Arc::new(AtomicUsize::new(0));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel::<(usize, Option<String>, Option<String>)>();
+
+    let workers = tasks.len().min(EXTRAS_WORKERS).max(1);
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let tasks = tasks.clone();
+        let next = next.clone();
+        let cancelled = cancelled.clone();
+        let state = state.clone();
+        let generation = generation.clone();
+        let tx = tx.clone();
+        let key = key.to_string();
+        handles.push(thread::spawn(move || loop {
+            if generation.load(Ordering::SeqCst) != my_gen {
+                cancelled.store(true, Ordering::SeqCst);
+                return;
+            }
+            let idx = next.fetch_add(1, Ordering::SeqCst);
+            let Some((line_i, text, need_tr, need_rm)) = tasks.get(idx) else {
+                return;
+            };
+            let (tr, rm) = fetch_line(text, *need_tr, *need_rm);
+            if generation.load(Ordering::SeqCst) != my_gen {
+                cancelled.store(true, Ordering::SeqCst);
+                return;
+            }
+            // Publish live into the displayed snapshot so lines fill in as they
+            // resolve. The network reading replaces any kana fallback.
+            {
+                let mut s = state.lock().unwrap();
+                if s.key == key {
+                    if let Some(line) = s.lines.get_mut(*line_i) {
+                        if tr.is_some() {
+                            line.translation = tr.clone();
+                        }
+                        if rm.is_some() {
+                            line.romaji = rm.clone();
+                        }
+                    }
                 }
             }
-        }
-        drop(s);
-        thread::sleep(Duration::from_millis(12));
+            let _ = tx.send((*line_i, tr, rm));
+        }));
     }
-    true
+    drop(tx);
+
+    // Fold results back into the local copy so the caller can cache them.
+    for (i, tr, rm) in rx {
+        if tr.is_some() {
+            lines[i].translation = tr;
+        }
+        if rm.is_some() {
+            lines[i].romaji = rm;
+        }
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+    !cancelled.load(Ordering::SeqCst)
 }
 
 fn set_status(
@@ -766,12 +815,28 @@ fn fetch_line(text: &str, want_trans: bool, want_rm: bool) -> (Option<String>, O
     (t, r)
 }
 
+/// One shared agent for all lyric/translation requests. It keeps a connection
+/// pool alive, so the many same-host translation calls reuse a warm TLS
+/// connection instead of re-handshaking on every line — the dominant cost when
+/// fetching translation/pronunciation. Timeouts keep a stalled host from hanging
+/// the fetch.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        let config = ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(6)))
+            .timeout_global(Some(Duration::from_secs(12)))
+            .build();
+        ureq::Agent::new_with_config(config)
+    })
+}
+
 fn http_get(url: &str) -> Result<String, String> {
     http_get_ref(url, None)
 }
 
 fn http_get_ref(url: &str, referer: Option<&str>) -> Result<String, String> {
-    let mut req = ureq::get(url).header("User-Agent", "Mozilla/5.0 beatscope");
+    let mut req = agent().get(url).header("User-Agent", "Mozilla/5.0 beatscope");
     if let Some(r) = referer {
         req = req.header("Referer", r);
     }

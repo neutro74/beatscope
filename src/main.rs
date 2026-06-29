@@ -13,7 +13,7 @@ mod player;
 mod romaji;
 mod theme;
 mod ui;
-mod upscale;
+mod update;
 mod visualizer;
 
 use std::io;
@@ -33,6 +33,10 @@ use crate::config::{Cli, Config};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.update {
+        return update::run(cli.force);
+    }
 
     if cli.list_sources {
         println!("Available capture sources:");

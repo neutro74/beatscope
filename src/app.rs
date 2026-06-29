@@ -53,7 +53,6 @@ pub struct App {
     protocol: Option<StatefulProtocol>,
     art_src: Option<image::DynamicImage>,
     proto_dims: (u16, u16),
-    proto_filter: crate::config::ArtFilter,
     last_art_url: Option<String>,
 
     samples: Vec<f32>,
@@ -71,6 +70,10 @@ pub struct App {
     last_seek: Instant,
     wave: Vec<f32>,
     peaks: Vec<f32>,
+    /// Bass-energy envelope (fast attack, slow decay) driving the circle pulse.
+    beat: f32,
+    /// Rolling spectrum history for the scrolling spectrogram mode.
+    spectro: std::collections::VecDeque<Vec<f32>>,
 
     lyrics: LyricsManager,
     lyrics_snapshot: Lyrics,
@@ -100,7 +103,6 @@ impl App {
         let player = PlayerHandle::start();
         let art = ArtLoader::start();
         let lyrics = LyricsManager::start();
-        let cfg_art_filter = cfg.art_filter;
         let cfg_latency = cfg.lyrics_latency;
 
         Ok(App {
@@ -113,7 +115,6 @@ impl App {
             protocol: None,
             art_src: None,
             proto_dims: (0, 0),
-            proto_filter: cfg_art_filter,
             last_art_url: None,
             samples: Vec::new(),
             np: NowPlaying::default(),
@@ -129,6 +130,8 @@ impl App {
             last_seek: Instant::now(),
             wave: Vec::new(),
             peaks: Vec::new(),
+            beat: 0.0,
+            spectro: std::collections::VecDeque::new(),
             lyrics,
             lyrics_snapshot: Lyrics::default(),
             last_lyrics_key: String::new(),
@@ -199,15 +202,20 @@ impl App {
     fn update(&mut self) {
         self.np = self.player.snapshot();
 
-        // Album art changed? Reset to a clean state and reload, so a song switch
-        // never leaves a stale/half-built image on screen.
+        // Album art changed? Request the new image but keep the current one on
+        // screen until the replacement actually decodes. Blanking immediately
+        // meant a replay or quick track change (where the player rewrites/rotates
+        // its art cache file) showed a broken/empty panel while the reload — and
+        // its retries — ran. Only clear when the track genuinely has no art.
         if self.np.art_url != self.last_art_url {
             self.last_art_url = self.np.art_url.clone();
-            self.art_src = None;
-            self.protocol = None;
-            self.proto_dims = (0, 0);
-            if let Some(url) = &self.np.art_url {
-                self.art.request(url.clone());
+            match &self.np.art_url {
+                Some(url) => self.art.request(url.clone()),
+                None => {
+                    self.art_src = None;
+                    self.protocol = None;
+                    self.proto_dims = (0, 0);
+                }
             }
         }
 
@@ -314,10 +322,9 @@ impl App {
         self.was_playing = playing;
     }
 
-    /// (Re)build the album-art protocol for the current art area. Smooth art is
-    /// upscaled to the exact target pixel size with our Lanczos resampler; crisp
-    /// art keeps native pixels for nearest-neighbour scaling. Only runs when the
-    /// source, filter, or art-area size actually changes — never per frame.
+    /// (Re)build the album-art protocol for the current art area. Art keeps its
+    /// native pixels for nearest-neighbour scaling. Only runs when the source or
+    /// art-area size actually changes — never per frame.
     fn ensure_art_protocol(&mut self, song_area: Rect) {
         let Some(src) = &self.art_src else { return };
         let art = ui::art_rect(song_area);
@@ -325,31 +332,12 @@ impl App {
             return;
         }
         let dims = (art.width, art.height);
-        if self.protocol.is_some()
-            && self.proto_dims == dims
-            && self.proto_filter == self.cfg.art_filter
-        {
+        if self.protocol.is_some() && self.proto_dims == dims {
             return;
         }
 
-        let image = match self.cfg.art_filter {
-            crate::config::ArtFilter::Smooth => {
-                let fs = self.picker.font_size();
-                // Cap the upscale target: ratatui-image transmits raw RGBA over
-                // the Kitty protocol (~4 bytes/px), so an oversized image means a
-                // large transfer that is more prone to corruption on song change.
-                // 1280px on the long edge stays crisp at terminal sizes while
-                // keeping the payload modest.
-                const MAX_PX: u32 = 1280;
-                let tw = (art.width as u32 * fs.width as u32).clamp(1, MAX_PX);
-                let th = (art.height as u32 * fs.height as u32).clamp(1, MAX_PX);
-                crate::upscale::resize_high_quality(src, tw, th)
-            }
-            crate::config::ArtFilter::Crisp => src.clone(),
-        };
-        self.protocol = Some(self.picker.new_resize_protocol(image));
+        self.protocol = Some(self.picker.new_resize_protocol(src.clone()));
         self.proto_dims = dims;
-        self.proto_filter = self.cfg.art_filter;
     }
 
     fn draw(&mut self, f: &mut Frame) {
@@ -383,6 +371,18 @@ impl App {
         self.last_frame = Instant::now();
         let levels = self.analyzer.compute(&self.samples, dt).to_vec();
 
+        // Bass-energy envelope: average the lowest bands, snap up on a kick and
+        // decay slowly, so the circle's ring throbs to the beat.
+        if !levels.is_empty() {
+            let bass_n = (levels.len() / 8).max(1);
+            let bass = levels[..bass_n].iter().copied().sum::<f32>() / bass_n as f32;
+            self.beat = if bass > self.beat {
+                bass
+            } else {
+                (self.beat - 1.8 * dt).max(0.0)
+            };
+        }
+
         // Peak-hold: instant rise to the current level, slow fall.
         if self.cfg.mode == VisMode::Peaks {
             if self.peaks.len() != levels.len() {
@@ -393,6 +393,18 @@ impl App {
                     *pk = if lv >= *pk { lv } else { (*pk - fall).max(lv) };
                 }
             }
+        }
+
+        // Spectrogram: keep a rolling, width-bounded history of frames (only while
+        // the mode is active; otherwise release the memory).
+        if self.cfg.mode == VisMode::Spectro {
+            self.spectro.push_back(levels.clone());
+            let cap = inner_w.max(1) as usize;
+            while self.spectro.len() > cap {
+                self.spectro.pop_front();
+            }
+        } else if !self.spectro.is_empty() {
+            self.spectro.clear();
         }
 
         // Wave mode: sample + temporally smooth the trace so it glides instead of
@@ -449,7 +461,7 @@ impl App {
 
         match self.overlay {
             Overlay::None => {}
-            Overlay::Help => render_help(f, area),
+            Overlay::Help => render_help(f, area, self.cfg.palette),
             Overlay::Modes => self.render_mode_picker(f, area),
             Overlay::Palettes => self.render_palette_picker(f, area),
         }
@@ -473,6 +485,9 @@ impl App {
             levels,
             wave: &self.wave,
             peaks: &self.peaks,
+            time: self.start.elapsed().as_secs_f64(),
+            beat: self.beat,
+            spectro: &self.spectro,
             title,
         };
         visualizer::render(f, area, &params);
@@ -515,10 +530,6 @@ impl App {
             KeyCode::Char('s') => {
                 self.cfg.song_side = self.cfg.song_side.flip();
                 self.toast("swapped sides".into());
-            }
-            KeyCode::Char('i') => {
-                self.cfg.art_filter = self.cfg.art_filter.toggle();
-                self.toast(format!("art: {}", self.cfg.art_filter.name()));
             }
             KeyCode::Char('g') => {
                 self.cfg.auto_gain = !self.cfg.auto_gain;
@@ -868,9 +879,11 @@ fn song_panel_width(total: u16) -> u16 {
     w.clamp(40, 70).min(total.saturating_sub(12))
 }
 
-fn render_help(f: &mut Frame, area: Rect) {
+fn render_help(f: &mut Frame, area: Rect, palette: crate::theme::Palette) {
+    let accent = palette.accent();
+    let accent_dim = palette.accent_dim();
     // Two-column layout so the menu stays short and never gets clipped.
-    let binds: [(&str, &str); 18] = [
+    let binds: [(&str, &str); 17] = [
         ("n / b", "next / prev track"),
         ("space", "play / pause"),
         ("← / →", "seek 5s"),
@@ -880,7 +893,6 @@ fn render_help(f: &mut Frame, area: Rect) {
         ("s", "swap sides"),
         ("+ / -", "gain"),
         ("[ / ]", "bar width"),
-        ("i", "art smooth/crisp"),
         ("g", "toggle auto-gain"),
         ("l", "lyrics off/full/split"),
         ("t", "lyrics translation"),
@@ -896,9 +908,7 @@ fn render_help(f: &mut Frame, area: Rect) {
         vec![
             Span::styled(
                 format!("{k:>7} ", k = k),
-                Style::default()
-                    .fg(Color::Rgb(120, 200, 255))
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("{d:<18}", d = d),
@@ -935,10 +945,10 @@ fn render_help(f: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Rgb(120, 200, 255)))
+        .border_style(Style::default().fg(accent_dim))
         .title(Span::styled(
             " keybindings ",
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ));
     f.render_widget(Paragraph::new(lines).block(block), rect);
 }

@@ -15,6 +15,10 @@ use mpris::{PlaybackStatus, PlayerFinder};
 pub struct NowPlaying {
     pub connected: bool,
     pub player_name: String,
+    /// MPRIS `mpris:trackid` — the canonical per-track identity. Updated
+    /// atomically with the rest of the metadata, so it's the reliable signal
+    /// that the track changed (unlike `Position`, a separate property that lags).
+    pub track_id: String,
     pub title: String,
     pub artist: String,
     pub album: String,
@@ -115,10 +119,16 @@ fn player_thread(state: Arc<Mutex<Shared>>, rx: Receiver<Command>) {
     // diverges from our prediction (a seek, a pause, or a track change).
     let mut anchor_pos = 0.0f64;
     let mut anchor_at = Instant::now();
-    let mut prev_title = String::new();
-    let mut prev_len = 0.0f64;
+    let mut prev_id = String::new();
     let mut prev_playing = false;
     let mut diverge_count = 0u8;
+    // After a track change the clock is seeded at 0 and `Position` is ignored
+    // until it proves it's tracking (`settled`). This avoids anchoring to a
+    // stale position the player hasn't reset yet.
+    let mut settled = true;
+    let mut unsettled_since = Instant::now();
+    let mut prev_read_pos = 0.0f64;
+    let mut prev_read_at = Instant::now();
 
     loop {
         // Acquire / re-acquire a player if needed.
@@ -137,29 +147,66 @@ fn player_thread(state: Arc<Mutex<Shared>>, rx: Receiver<Command>) {
 
         // Free-running real-time clock. Playback and our clock both advance at
         // real time, so once anchored at track start there's nothing to keep
-        // correcting — and nothing to jump. This player's MPRIS position is
-        // blippy (it momentarily resets mid-transition), so we ignore transient
-        // divergence and only re-anchor on a *confirmed* seek: several polls in a
-        // row that disagree. Track change / pause re-anchor immediately.
+        // correcting — and nothing to jump.
+        //
+        // The catch: MPRIS `Metadata` (title/length/trackid) updates atomically,
+        // but `Position` is a *separate* property that frequently lags the track
+        // flip. So at the instant the new song's metadata appears, `get_position`
+        // can still return the *old* track's position. Anchoring to that stale
+        // value made the new song display the previous song's time for its whole
+        // duration. Instead, on a track change we seed the clock at 0 and ignore
+        // `Position` until it demonstrably catches up to our clock.
         let now = Instant::now();
         let playing = last.status == Status::Playing;
-        let track_changed = last.title != prev_title || (last.length - prev_len).abs() > 0.5;
-        prev_title = last.title.clone();
-        prev_len = last.length;
+        // Identity from the canonical trackid; fall back to title for the rare
+        // player that doesn't expose one.
+        let id = if last.track_id.is_empty() {
+            last.title.clone()
+        } else {
+            last.track_id.clone()
+        };
+        let track_changed = id != prev_id;
+        prev_id = id;
 
         let resumed = playing && !prev_playing;
         prev_playing = playing;
-        if track_changed || !playing || resumed {
-            // Anchor cleanly on pause, track change, and the moment playback
-            // resumes — so the clock restarts exactly at the resume position
-            // (no leftover poll-interval bias).
+        if track_changed {
+            // New track starts at the beginning; don't trust the (lagging)
+            // Position yet.
+            anchor_pos = 0.0;
+            anchor_at = now;
+            diverge_count = 0;
+            settled = false;
+            unsettled_since = now;
+        } else if !playing || resumed {
+            // Pause / resume: the reported position is stable and accurate.
             anchor_pos = last.position;
             anchor_at = now;
             diverge_count = 0;
+            settled = true;
         } else {
             let predicted = anchor_pos + (now - anchor_at).as_secs_f64();
             let diff = last.position - predicted;
-            if diff.abs() > 0.7 {
+            if !settled {
+                if diff.abs() < 0.7 {
+                    // Position caught up to our 0-seeded clock — trust it now.
+                    settled = true;
+                    diverge_count = 0;
+                } else if now.duration_since(unsettled_since).as_secs_f64() > 1.0 {
+                    // It never agreed with a start-at-0 assumption. If it's a
+                    // real clock advancing at ~1x (a track that legitimately
+                    // started mid-way, e.g. a resume), adopt it; otherwise it's
+                    // a stale reading and we keep free-running from 0.
+                    let dt = now.duration_since(prev_read_at).as_secs_f64().max(1e-3);
+                    let vel = (last.position - prev_read_pos) / dt;
+                    if (vel - 1.0).abs() < 0.3 {
+                        anchor_pos = last.position;
+                        anchor_at = now;
+                        settled = true;
+                    }
+                }
+                // else: hold the free-running clock seeded at 0.
+            } else if diff.abs() > 0.7 {
                 diverge_count = diverge_count.saturating_add(1);
                 if diverge_count >= 3 {
                     // Confirmed seek — re-anchor to the real position.
@@ -173,6 +220,8 @@ fn player_thread(state: Arc<Mutex<Shared>>, rx: Receiver<Command>) {
                 // In agreement: keep free-running (do not touch the anchor).
             }
         }
+        prev_read_pos = last.position;
+        prev_read_at = now;
 
         {
             let mut s = state.lock().unwrap();
@@ -251,11 +300,12 @@ fn read_now_playing(p: &mpris::Player, last: &NowPlaying) -> NowPlaying {
 
     // Metadata can briefly be empty mid-transition; keep the last good values
     // instead of flashing to "nothing playing" (which corrupts the seeker/art).
-    let (title, artist, album, art_url, length) = match p.get_metadata() {
+    let (track_id, title, artist, album, art_url, length) = match p.get_metadata() {
         Ok(m) => {
             let title = m.title().unwrap_or("").to_string();
             if title.is_empty() {
                 (
+                    last.track_id.clone(),
                     last.title.clone(),
                     last.artist.clone(),
                     last.album.clone(),
@@ -264,6 +314,7 @@ fn read_now_playing(p: &mpris::Player, last: &NowPlaying) -> NowPlaying {
                 )
             } else {
                 (
+                    m.track_id().map(|t| t.to_string()).unwrap_or_default(),
                     title,
                     m.artists()
                         .map(|a| a.join(", "))
@@ -276,6 +327,7 @@ fn read_now_playing(p: &mpris::Player, last: &NowPlaying) -> NowPlaying {
             }
         }
         Err(_) => (
+            last.track_id.clone(),
             last.title.clone(),
             last.artist.clone(),
             last.album.clone(),
@@ -289,7 +341,7 @@ fn read_now_playing(p: &mpris::Player, last: &NowPlaying) -> NowPlaying {
     // one — that's how a 7-minute song ends up showing a previous 2:14 length.
     let length = if length > 0.0 {
         length
-    } else if title == last.title {
+    } else if track_id == last.track_id && title == last.title {
         last.length
     } else {
         0.0
@@ -299,6 +351,7 @@ fn read_now_playing(p: &mpris::Player, last: &NowPlaying) -> NowPlaying {
     NowPlaying {
         connected: true,
         player_name: p.identity().to_string(),
+        track_id,
         title,
         artist,
         album,

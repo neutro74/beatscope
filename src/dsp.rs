@@ -158,11 +158,12 @@ impl Analyzer {
             }
         }
 
-        // Auto-gain: nudge a single scalar so the loudest band tends toward ~0.85,
-        // but stay within a limited range and adapt slowly so quiet stays quiet.
+        // Auto-gain: nudge a single scalar so the loudest band tends toward ~0.7,
+        // leaving headroom so peaks don't slam the top of the panel. Stay within a
+        // limited range and adapt slowly so quiet stays quiet.
         if self.auto_gain {
             if frame_peak > 0.02 {
-                let desired = (0.85 / frame_peak).clamp(0.4, 3.0);
+                let desired = (0.70 / frame_peak).clamp(0.4, 3.0);
                 let rate = if desired < self.agc { 0.03 } else { 0.12 };
                 self.agc += (desired - self.agc) * rate;
             }

@@ -10,7 +10,7 @@ use ratatui::Frame;
 use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::{FilterType, Resize, StatefulImage};
 
-use crate::config::{ArtFilter, Config};
+use crate::config::Config;
 use crate::player::{NowPlaying, Status};
 
 const DIM: Color = Color::Rgb(155, 155, 170);
@@ -67,13 +67,12 @@ pub fn render_song_panel(
     } else {
         "no album art"
     };
-    render_art(f, rows[0], protocol, cfg.art_filter, status);
+    render_art(f, rows[0], protocol, status);
     render_details(f, rows[1], np, cfg, drag_frac, elapsed, accent, &mut hits);
     hits
 }
 
-/// The album-art cell rectangle within a given song-panel area. Shared so the
-/// app can pre-upscale the image to exactly this region's pixel size.
+/// The album-art cell rectangle within a given song-panel area.
 pub fn art_rect(panel: Rect) -> Rect {
     let block = Block::default().borders(Borders::ALL);
     let inner = block.inner(panel);
@@ -93,18 +92,13 @@ fn render_art(
     f: &mut Frame,
     area: Rect,
     protocol: &mut Option<StatefulProtocol>,
-    filter: ArtFilter,
     status: &str,
 ) {
     if area.height == 0 || area.width == 0 {
         return;
     }
-    // Smooth art is pre-upscaled to the exact size by `upscale`, so just fit it.
-    // Crisp art keeps its native pixels and nearest-scales to fill.
-    let resize = match filter {
-        ArtFilter::Smooth => Resize::Fit(None),
-        ArtFilter::Crisp => Resize::Scale(Some(FilterType::Nearest)),
-    };
+    // Album art keeps its native pixels and nearest-scales to fill.
+    let resize = Resize::Scale(Some(FilterType::Nearest));
     match protocol {
         Some(proto) => {
             f.render_stateful_widget(StatefulImage::default().resize(resize), area, proto);

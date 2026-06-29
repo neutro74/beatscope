@@ -60,6 +60,30 @@ fn is_small_y(c: char) -> bool {
     matches!(c, 'ゃ' | 'ゅ' | 'ょ' | 'ャ' | 'ュ' | 'ョ')
 }
 
+/// A "word" character — kana or kanji — used to spot grammatical particles.
+fn is_word_char(c: char) -> bool {
+    let u = c as u32;
+    (0x3041..=0x3096).contains(&u)      // hiragana
+        || (0x30A1..=0x30FA).contains(&u) // katakana
+        || (0x3400..=0x4DBF).contains(&u) // CJK ext-A
+        || (0x4E00..=0x9FFF).contains(&u) // CJK unified
+}
+
+/// Pronunciation override for the grammatical particles は/へ/を, which are read
+/// differently from their dictionary syllable (e.g. こんにちは → "konnichiwa",
+/// not "konnichiha"). Particles are hiragana and attach to a preceding word, so
+/// we treat は/へ as the particle when they follow a word character; を is only
+/// ever the object particle, so it's always "o".
+fn particle_reading(raw: char, chars: &[char], i: usize) -> Option<&'static str> {
+    let after_word = i > 0 && is_word_char(chars[i - 1]);
+    match raw {
+        'を' => Some("o"),
+        'は' if after_word => Some("wa"),
+        'へ' if after_word => Some("e"),
+        _ => None,
+    }
+}
+
 /// True if the string contains any kana worth romanizing.
 pub fn has_kana(s: &str) -> bool {
     s.chars().any(|c| {
@@ -74,8 +98,19 @@ mod tests {
 
     #[test]
     fn basic_hiragana() {
-        assert_eq!(romanize("こんにちは"), "konnichiha");
+        assert_eq!(romanize("こんにちは"), "konnichiwa");
         assert_eq!(romanize("ありがとう"), "arigatou");
+    }
+
+    #[test]
+    fn particles_pronounced() {
+        // は as the topic particle is read "wa"; word-initial は stays "ha".
+        assert_eq!(romanize("わたしは"), "watashiwa");
+        assert_eq!(romanize("はな"), "hana");
+        // へ as the direction particle is read "e".
+        assert_eq!(romanize("そらへ"), "sorae");
+        // を is always the object particle, read "o".
+        assert_eq!(romanize("すしを"), "sushio");
     }
 
     #[test]
@@ -161,6 +196,9 @@ pub fn romanize(s: &str) -> String {
             continue;
         }
         if let Some(r) = base(c) {
+            // Read は/へ/を as particles when context calls for it (pronunciation,
+            // not literal kana spelling).
+            let r = particle_reading(raw, &chars, i).unwrap_or(r);
             push(&mut out, &mut sokuon, r);
         } else {
             sokuon = false;

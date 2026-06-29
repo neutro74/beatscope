@@ -2,7 +2,7 @@
 
 **A terminal music visualizer with real album art, synced lyrics, and a configurable cava-style spectrum.**
 
-beatscope draws your now-playing track as a crisp, high-resolution album cover (via the Kitty graphics protocol), mouse-driven transport controls, and a fast FFT spectrum with 6 modes and 27 color palettes — all beside a karaoke-style synced-lyrics panel with pronunciation and translation for any language.
+beatscope draws your now-playing track as a crisp, high-resolution album cover (via the Kitty graphics protocol), mouse-driven transport controls, and a fast FFT spectrum with 10 modes and 27 color palettes — all beside a karaoke-style synced-lyrics panel with pronunciation and translation for any language.
 
 ![beatscope overview](docs/overview.png)
 
@@ -10,9 +10,9 @@ beatscope draws your now-playing track as a crisp, high-resolution album cover (
 
 ## Features
 
-- **Real album art** — rendered with the Kitty graphics protocol, high-quality Lanczos upscaling, and a smooth/crisp toggle. No blocky half-cells.
+- **Real album art** — rendered with the Kitty graphics protocol at native pixel sharpness. No blocky half-cells.
 - **Configurable spectrum** — a low-latency FFT visualizer with floor/ceiling dB mapping and bounded auto-gain so it never clips out.
-  - 6 modes: **bars · peaks · mirror · spectrum · wave · circle**
+  - 10 modes: **bars · peaks · mirror · spectrum · bricks · lanes · wave · circle · rings · spectro**
   - 27 palettes: spectrum, rainbow, fire, lava, sunset, gold, aurora, forest, matrix, ocean, ice, neon, synthwave, vaporwave, candy, plasma, viridis, magma, cyberpunk, ember, mint, sakura, dracula, nord, gruvbox, solar, mono
 - **Synced lyrics** — fetched from [lrclib](https://lrclib.net) with a NetEase fallback, with karaoke word-by-word highlighting and centered auto-scroll. Show them full-screen or split alongside the visualizer.
 - **Pronunciation & translation** — romanization for **any** script (instant offline Japanese kana, plus network readings for kanji, Korean, Cyrillic, and more) and inline English translation.
@@ -85,7 +85,7 @@ beatscope captures the **monitor** of your default audio sink, so it visualizes 
 | Flag | Description |
 |------|-------------|
 | `-s, --source <NAME>` | Capture source (defaults to the default sink's monitor) |
-| `-m, --mode <MODE>` | `bars`, `peaks`, `mirror`, `spectrum`, `wave`, `circle` |
+| `-m, --mode <MODE>` | `bars`, `peaks`, `mirror`, `spectrum`, `bricks`, `lanes`, `wave`, `circle`, `rings`, `spectro` |
 | `-p, --palette <NAME>` | Any of the 27 palettes |
 | `-g, --gain <FLOAT>` | Sensitivity multiplier |
 | `--fps <N>` | Target frame rate |
@@ -101,11 +101,11 @@ beatscope captures the **monitor** of your default audio sink, so it visualizes 
 | `←` / `→` | seek 5s | | `↑` / `↓` | volume |
 | `m` | mode picker | | `c` | palette picker |
 | `s` | swap sides | | `+` / `-` | gain |
-| `[` / `]` | bar width | | `i` | art smooth/crisp |
-| `g` | toggle auto-gain | | `l` | lyrics off/full/split |
-| `t` | lyrics translation | | `r` | lyrics pronunciation |
-| `,` / `.` | lyrics sync trim | | `w` | save config |
-| `?` / `h` | toggle help | | `q` / `esc` | quit |
+| `[` / `]` | bar width | | `g` | toggle auto-gain |
+| `l` | lyrics off/full/split | | `t` | lyrics translation |
+| `r` | lyrics pronunciation | | `,` / `.` | lyrics sync trim |
+| `w` | save config | | `?` / `h` | toggle help |
+| `q` / `esc` | quit | | | |
 
 **Mouse:** click the transport buttons, drag the progress bar to seek, scroll to adjust volume. In the pickers, scroll to preview and click to confirm.
 
@@ -113,7 +113,7 @@ beatscope captures the **monitor** of your default audio sink, so it visualizes 
 
 ## Configuration
 
-Settings live at `~/.config/beatscope/config.toml` and are written automatically on exit (or with `w`). It stores your mode, palette, side, gain, bar width, lyrics mode, pronunciation/translation toggles, art filter, and the measured lyrics latency.
+Settings live at `~/.config/beatscope/config.toml` and are written automatically on exit (or with `w`). It stores your mode, palette, side, gain, bar width, lyrics mode, pronunciation/translation toggles, and the measured lyrics latency.
 
 Lyrics and cover-art lookups are cached under `~/.cache/beatscope/` so replaying a track is instant and offline-friendly.
 
