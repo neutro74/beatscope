@@ -10,17 +10,17 @@ beatscope draws your now-playing track as a crisp, high-resolution album cover (
 
 ## Features
 
-- 🎨 **Real album art** — rendered with the Kitty graphics protocol, high-quality Lanczos upscaling, and a smooth/crisp toggle. No blocky half-cells.
-- 📊 **Configurable spectrum** — a low-latency FFT visualizer with floor/ceiling dB mapping and bounded auto-gain so it never clips out.
+- **Real album art** — rendered with the Kitty graphics protocol, high-quality Lanczos upscaling, and a smooth/crisp toggle. No blocky half-cells.
+- **Configurable spectrum** — a low-latency FFT visualizer with floor/ceiling dB mapping and bounded auto-gain so it never clips out.
   - 6 modes: **bars · peaks · mirror · spectrum · wave · circle**
   - 27 palettes: spectrum, rainbow, fire, lava, sunset, gold, aurora, forest, matrix, ocean, ice, neon, synthwave, vaporwave, candy, plasma, viridis, magma, cyberpunk, ember, mint, sakura, dracula, nord, gruvbox, solar, mono
-- 🎤 **Synced lyrics** — fetched from [lrclib](https://lrclib.net) with a NetEase fallback, with karaoke word-by-word highlighting and centered auto-scroll. Show them full-screen or split alongside the visualizer.
-- 🌐 **Pronunciation & translation** — romanization for **any** script (instant offline Japanese kana, plus network readings for kanji, Korean, Cyrillic, …) and inline English translation.
-- ⏱️ **Auto latency calibration** — measures your real audio-output latency from playback transients and lines the lyrics up automatically (with a manual trim if you want it).
-- 🖱️ **Mouse-driven controls** — clickable transport buttons, drag the progress bar to seek, scroll to change volume.
-- 🎛️ **MPRIS integration** — works with any MPRIS-capable player (Spotify, Cider, browsers, mpv, …) over D-Bus.
-- 💾 **Persistent & fast** — your mode/palette/settings are saved on exit, and lyrics are cached on disk for instant replays.
-- 🎨 **Themed UI** — the whole interface (borders, titles, progress, highlights) recolors to match the active palette.
+- **Synced lyrics** — fetched from [lrclib](https://lrclib.net) with a NetEase fallback, with karaoke word-by-word highlighting and centered auto-scroll. Show them full-screen or split alongside the visualizer.
+- **Pronunciation & translation** — romanization for **any** script (instant offline Japanese kana, plus network readings for kanji, Korean, Cyrillic, and more) and inline English translation.
+- **Auto latency calibration** — measures your real audio-output latency from playback transients and lines the lyrics up automatically (with a manual trim if you want it).
+- **Mouse-driven controls** — clickable transport buttons, drag the progress bar to seek, scroll to change volume.
+- **MPRIS integration** — works with any MPRIS-capable player (Spotify, Cider, browsers, mpv, and more) over D-Bus.
+- **Persistent & fast** — your mode/palette/settings are saved on exit, and lyrics are cached on disk for instant replays.
+- **Themed UI** — the whole interface (borders, titles, progress, highlights) recolors to match the active palette.
 
 ---
 
